@@ -3,8 +3,24 @@ import time
 import os
 import psutil
 import traceback
+import sys
+import io
 from mps_sim import QPU
 import numpy as np
+
+# Stream class to capture stdout and send to queue
+class StreamToQueue:
+    def __init__(self, queue, core_id):
+        self.queue = queue
+        self.core_id = core_id
+
+    def write(self, buf):
+        # Only send non-empty strings
+        if buf:
+            self.queue.put({'core_id': self.core_id, 'output': buf})
+
+    def flush(self):
+        pass
 
 # Worker function to run in a separate process
 def simulation_worker(config, user_code, status_queue, stop_event):
@@ -14,6 +30,11 @@ def simulation_worker(config, user_code, status_queue, stop_event):
     status_queue: multiprocessing.Queue to send updates
     stop_event: multiprocessing.Event to signal stop
     """
+
+    # Redirect stdout
+    original_stdout = sys.stdout
+    sys.stdout = StreamToQueue(status_queue, config['core_id'])
+
     try:
         # Initialize QPU
         qpu = QPU(config['num_qubits'], config['bond_dim'])
@@ -87,6 +108,9 @@ def simulation_worker(config, user_code, status_queue, stop_event):
         status_queue.put({'core_id': config['core_id'], 'error': 'Stopped', 'finished': True})
     except Exception as e:
         status_queue.put({'core_id': config['core_id'], 'error': str(e) + "\n" + traceback.format_exc(), 'finished': True})
+    finally:
+        # Restore stdout
+        sys.stdout = original_stdout
 
 class SimulationManager:
     def __init__(self):
@@ -95,6 +119,7 @@ class SimulationManager:
         self.stop_event = multiprocessing.Event()
         self.start_time = None
         self.stats = {}
+        self.logs = {} # Store logs per core
 
     def start_simulation(self, code, bond_dim, num_qubits, num_cores):
         if self.is_running():
@@ -104,6 +129,7 @@ class SimulationManager:
         self.processes = []
         self.queue = multiprocessing.Queue() # Fresh queue
         self.stats = {i: {'gate_count': 0, 'memory': 0, 'finished': False} for i in range(num_cores)}
+        self.logs = {i: [] for i in range(num_cores)}
         self.start_time = time.time()
 
         for i in range(num_cores):
@@ -138,7 +164,10 @@ class SimulationManager:
             try:
                 data = self.queue.get_nowait()
                 cid = data['core_id']
-                if 'error' in data:
+
+                if 'output' in data:
+                    self.logs[cid].append(data['output'])
+                elif 'error' in data:
                     self.stats[cid]['error'] = data['error']
                     self.stats[cid]['finished'] = True
                 else:
@@ -162,6 +191,14 @@ class SimulationManager:
         num_cores = len(self.stats)
         gates_per_sec_per_core = (gates_per_sec / num_cores) if num_cores > 0 else 0
 
+        # Combine logs
+        combined_logs = ""
+        for cid in sorted(self.logs.keys()):
+            if self.logs[cid]:
+                combined_logs += f"--- Core {cid} ---\n"
+                combined_logs += "".join(self.logs[cid])
+                combined_logs += "\n"
+
         return {
             'elapsed': elapsed,
             'total_gates': total_gates,
@@ -169,5 +206,6 @@ class SimulationManager:
             'gates_per_sec_core': gates_per_sec_per_core,
             'total_memory': total_mem,
             'active_cores': active_cores,
-            'errors': [s['error'] for s in self.stats.values() if 'error' in s]
+            'errors': [s['error'] for s in self.stats.values() if 'error' in s],
+            'output': combined_logs
         }

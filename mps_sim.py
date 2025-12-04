@@ -1,6 +1,5 @@
 import numpy as np
-import numba
-from numba import jit, njit, prange
+from numba import jit
 
 # Define Gates
 I = np.array([[1, 0], [0, 1]], dtype=np.complex128)
@@ -39,42 +38,46 @@ SWAP = np.array([[1, 0, 0, 0],
                  [0, 1, 0, 0],
                  [0, 0, 0, 1]], dtype=np.complex128).reshape(2, 2, 2, 2)
 
-@jit(nopython=True, fastmath=True)
+# Removed numba loop for simpler/optimized numpy call.
+# Benchmarks often show tensordot is comparable or faster for this specific contraction shape
+# and avoids JIT compilation overhead on first run.
 def contract_1q(tensor, gate):
     # tensor: (D_L, 2, D_R)
     # gate: (2, 2)
     # out: (D_L, 2, D_R)
-    D_L = tensor.shape[0]
-    D_R = tensor.shape[2]
-    out = np.zeros_like(tensor)
-    for i in range(D_L):
-        for j in range(D_R):
-            for k in range(2):
-                for l in range(2):
-                    out[i, k, j] += gate[k, l] * tensor[i, l, j]
-    return out
+
+    # Contract index 1 of tensor with index 1 of gate (gate indices are out, in)
+    # gate[k, l] * tensor[i, l, j]
+    # We want to contract l.
+
+    # tensordot(tensor, gate, axes=([1], [1]))
+    # tensor indices: i, l, j (0, 1, 2)
+    # gate indices: k, l (0, 1)
+    # result indices: i, j, k
+    # We want: i, k, j
+
+    temp = np.tensordot(tensor, gate, axes=([1], [1])) # (D_L, D_R, 2)
+    return np.transpose(temp, (0, 2, 1))
 
 def contract_2q_svd(left_tensor, right_tensor, gate, max_bond_dim):
     # left_tensor: (D_L, 2, D_mid)
     # right_tensor: (D_mid, 2, D_R)
-    # gate: (2, 2, 2, 2) (input_left, input_right, output_left, output_right) - Standard is usually (out_L, out_R, in_L, in_R)
-    # Let's align gate shape: gate[out_l, out_r, in_l, in_r]
+    # gate: (2, 2, 2, 2) (out_l, out_r, in_l, in_r)
 
     # Merge tensors
     # theta: (D_L, 2, 2, D_R)
     theta = np.tensordot(left_tensor, right_tensor, axes=(2, 0))
 
     # Apply gate
-    # gate is 4x4 usually, let's reshape gate to (2, 2, 2, 2) where indices are (out_l, out_r, in_l, in_r)
-    # theta indices: (d_l, in_l, in_r, d_r)
-    # result: (d_l, out_l, out_r, d_r)
-
-    # Using einsum for clarity, then optimize if needed.
-    # n=d_l, i=in_l, j=in_r, m=d_r
-    # k=out_l, l=out_r
     # gate[k, l, i, j] * theta[n, i, j, m] -> [n, k, l, m]
+    # theta indices: (n, i, j, m) (0, 1, 2, 3)
+    # gate indices: (k, l, i, j) (0, 1, 2, 3)
+    # contract theta(1, 2) with gate(2, 3)
+
+    # tensordot result: (n, m, k, l)
     theta_prime = np.tensordot(theta, gate, axes=([1, 2], [2, 3]))
-    # tensordot output will be (d_l, d_r, out_l, out_r). We need (d_l, out_l, out_r, d_r)
+
+    # Transpose to (n, k, l, m) -> (d_l, out_l, out_r, d_r)
     theta_prime = np.transpose(theta_prime, (0, 2, 3, 1))
 
     d_l = theta_prime.shape[0]
@@ -84,28 +87,29 @@ def contract_2q_svd(left_tensor, right_tensor, gate, max_bond_dim):
     theta_mat = theta_prime.reshape(d_l * 2, 2 * d_r)
 
     # SVD
+    # Use standard numpy SVD.
     U, S, Vh = np.linalg.svd(theta_mat, full_matrices=False)
 
     # Truncate
     k = min(max_bond_dim, len(S))
-    # Keep only singular values > threshold? For now just fixed bond dim or full
 
+    # Keep only k largest
     U = U[:, :k]
     S = S[:k]
     Vh = Vh[:k, :]
 
-    # Absorb S into Vh (canonical form to the right usually, or split)
-    # Let's split sqrt(S) for symmetry or put S to right.
-    # Standard mixed canonical usually keeps orthogonality. Let's multiply S into Vh (Right Canonicalish update for next step? Or Left?)
-    # For simple time evolution, usually we keep Vidal form (Gamma-Lambda-Gamma) or just normalize.
-    # Here I'll just push S to the right tensor to maintain valid MPS form generally.
+    # Normalize S to prevent numerical drift (explode/vanish)
+    # For MPS evolution, maintaining norm is tricky without canonical form management.
+    # But ensuring the state doesn't vanish/explode is good.
+    norm = np.linalg.norm(S)
+    if norm > 1e-12:
+        S = S / norm
 
+    # Push S to the right
     Vh = np.diag(S) @ Vh
 
     # Reshape back
-    # U: (d_l * 2, k) -> (d_l, 2, k)
     new_left = U.reshape(d_l, 2, k)
-    # Vh: (k, 2 * d_r) -> (k, 2, d_r)
     new_right = Vh.reshape(k, 2, d_r)
 
     return new_left, new_right
@@ -153,7 +157,6 @@ class QPU:
         if c == t - 1:
             self.apply_2q(CX, c, t)
         elif t == c - 1:
-            # Swap control/target logic or use SWAP?
             # CX(j, i) = (H_j H_i) CX(i, j) (H_j H_i)
             self.h(c)
             self.h(t)
@@ -161,20 +164,24 @@ class QPU:
             self.h(c)
             self.h(t)
         else:
-             # Implement SWAP chain if needed, but for now stick to NN
-             pass
+             # Just raise error if not nearest neighbor
+             raise ValueError(f"CX not supported for non-adjacent qubits {c}, {t}")
 
     def cz(self, i, j):
         if j == i + 1:
             self.apply_2q(CZ, i, j)
         elif i == j + 1:
             self.apply_2q(CZ, j, i)
+        else:
+             raise ValueError(f"CZ not supported for non-adjacent qubits {i}, {j}")
 
     def swap(self, i, j):
         if j == i + 1:
             self.apply_2q(SWAP, i, j)
         elif i == j + 1:
             self.apply_2q(SWAP, j, i)
+        else:
+             raise ValueError(f"SWAP not supported for non-adjacent qubits {i}, {j}")
 
     def memory_usage(self):
         # Estimate bytes

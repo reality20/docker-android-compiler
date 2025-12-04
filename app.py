@@ -91,7 +91,7 @@ with gr.Blocks(title="QPU Simulator") as demo:
         gates_display = gr.Textbox(label="Total Gates Executed", value="0", interactive=False)
 
     with gr.Row():
-        output_display = gr.Code(label="Output Log", value="", language="text", lines=10, interactive=False)
+        output_display = gr.Code(label="Output Log", value="", language=None, lines=10, interactive=False)
 
     # Event handlers
     run_btn.click(

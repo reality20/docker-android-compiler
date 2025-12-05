@@ -1,0 +1,5 @@
+numpy
+scipy
+gradio
+psutil
+numba

@@ -36,34 +36,73 @@ def update_status():
     return state_str, elapsed, gps_core, mem, total_gates, output_log
 
 default_code = """# Example Simulation
-# 'qpu' object is available with methods:
+# This demo showcases all available QPU operations:
 # 1-qubit: h, s, t, x, y, z, rx, ry, rz
 # 2-qubit: cx, cz, swap
+# Measurement: measure(i)
+# Reset: reset(i), reset_all()
 import random
+import math
 
-print(f"Starting simulation on {qpu._core_id}...")
+core = qpu._core_id
+print(f"Core {core}: Starting comprehensive demo.")
 
-# Apply random gates using all available operations
-for i in range(1000):
+# 1. State Preparation & Single Qubit Gates
+# Iterate through all single qubit gates
+for i in range(qpu.num_qubits):
+    qpu.x(i)       # X
+    qpu.h(i)       # Hadamard
+    qpu.s(i)       # S phase
+    qpu.t(i)       # T phase
+    qpu.y(i)       # Y
+    qpu.z(i)       # Z
+    qpu.rx(i, 0.1) # RX
+    qpu.ry(i, 0.2) # RY
+    qpu.rz(i, 0.3) # RZ
+
+# 2. Entanglement & Two Qubit Gates
+# Create a chain of entanglement
+for i in range(qpu.num_qubits - 1):
+    qpu.cx(i, i+1)   # CNOT
+    qpu.cz(i, i+1)   # CZ
+    qpu.swap(i, i+1) # SWAP
+    qpu.swap(i, i+1) # Swap back to restore order
+
+# 3. Measurement & Feedback
+# Measure the first qubit
+m = qpu.measure(0)
+print(f"Core {core}: Measured qubit 0 = {m}")
+
+# Conditional logic
+if m == 1:
+    qpu.x(1) # Corrective flip on neighbor
+
+# 4. Reset
+qpu.reset(0) # Reset qubit 0 to |0>
+m_check = qpu.measure(0)
+if m_check != 0:
+    print(f"Core {core}: Warning - Reset failed (probabilistic?)")
+
+# 5. Global Reset
+qpu.reset_all() # Reset entire register to |0...0>
+
+# 6. Random Circuit Loop
+# Run a random circuit using all gates
+for step in range(100):
     q = random.randint(0, qpu.num_qubits - 2)
 
-    # Single qubit gates
-    qpu.h(q)
-    qpu.s(q)
-    qpu.t(q)
-    qpu.x(q)
-    qpu.y(q)
-    qpu.z(q)
-    qpu.rx(q, 0.1)
-    qpu.ry(q, 0.2)
-    qpu.rz(q, 0.3)
+    # Randomly select a gate
+    op = random.choice(['h', 's', 't', 'x', 'y', 'z', 'rx', 'ry', 'rz', 'cx', 'cz', 'swap'])
 
-    # Two qubit gates
-    qpu.cx(q, q+1)
-    qpu.cz(q, q+1)
-    qpu.swap(q, q+1)
+    if op in ['rx', 'ry', 'rz']:
+        getattr(qpu, op)(q, random.random())
+    elif op in ['cx', 'cz', 'swap']:
+        getattr(qpu, op)(q, q+1)
+    else:
+        getattr(qpu, op)(q)
 
-print(f"Core {qpu._core_id} finished.")
+mem_bytes = qpu.memory_usage()
+print(f"Core {core}: Finished. Approx memory: {mem_bytes} bytes")
 """
 
 with gr.Blocks(title="QPU Simulator") as demo:
@@ -81,7 +120,7 @@ with gr.Blocks(title="QPU Simulator") as demo:
             kill_btn = gr.Button("Kill Simulation", variant="stop")
 
         with gr.Column(scale=2):
-            code_input = gr.Code(label="Simulation Code (Python)", value=default_code, language="python", lines=20)
+            code_input = gr.Code(label="Simulation Code (Python)", value=default_code, language="python", lines=25)
 
     with gr.Row():
         status_display = gr.Textbox(label="Status", value="Idle", interactive=False)

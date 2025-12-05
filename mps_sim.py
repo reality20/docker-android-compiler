@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.linalg
 from numba import jit
 
 # Define Gates
@@ -38,43 +39,25 @@ SWAP = np.array([[1, 0, 0, 0],
                  [0, 1, 0, 0],
                  [0, 0, 0, 1]], dtype=np.complex128).reshape(2, 2, 2, 2)
 
-# Removed numba loop for simpler/optimized numpy call.
-# Benchmarks often show tensordot is comparable or faster for this specific contraction shape
-# and avoids JIT compilation overhead on first run.
 def contract_1q(tensor, gate):
     # tensor: (D_L, 2, D_R)
     # gate: (2, 2)
     # out: (D_L, 2, D_R)
-
-    # Contract index 1 of tensor with index 1 of gate (gate indices are out, in)
-    # gate[k, l] * tensor[i, l, j]
-    # We want to contract l.
-
-    # tensordot(tensor, gate, axes=([1], [1]))
-    # tensor indices: i, l, j (0, 1, 2)
-    # gate indices: k, l (0, 1)
-    # result indices: i, j, k
-    # We want: i, k, j
-
-    temp = np.tensordot(tensor, gate, axes=([1], [1])) # (D_L, D_R, 2)
+    # tensordot axes=([1], [1]) contracts physical dim.
+    # tensor(i, l, j) * gate(k, l) -> (i, j, k). Transpose to (i, k, j)
+    temp = np.tensordot(tensor, gate, axes=([1], [1]))
     return np.transpose(temp, (0, 2, 1))
 
 def contract_2q_svd(left_tensor, right_tensor, gate, max_bond_dim):
-    # left_tensor: (D_L, 2, D_mid)
+    # left_tensor: (D_L, 2, D_mid) - CENTER (or implicitly absorbed)
     # right_tensor: (D_mid, 2, D_R)
     # gate: (2, 2, 2, 2) (out_l, out_r, in_l, in_r)
 
     # Merge tensors
-    # theta: (D_L, 2, 2, D_R)
-    theta = np.tensordot(left_tensor, right_tensor, axes=(2, 0))
+    theta = np.tensordot(left_tensor, right_tensor, axes=(2, 0)) # (D_L, 2, 2, D_R)
 
     # Apply gate
-    # gate[k, l, i, j] * theta[n, i, j, m] -> [n, k, l, m]
-    # theta indices: (n, i, j, m) (0, 1, 2, 3)
-    # gate indices: (k, l, i, j) (0, 1, 2, 3)
-    # contract theta(1, 2) with gate(2, 3)
-
-    # tensordot result: (n, m, k, l)
+    # theta(n, i, j, m) * gate(k, l, i, j) -> (n, m, k, l)
     theta_prime = np.tensordot(theta, gate, axes=([1, 2], [2, 3]))
 
     # Transpose to (n, k, l, m) -> (d_l, out_l, out_r, d_r)
@@ -86,29 +69,24 @@ def contract_2q_svd(left_tensor, right_tensor, gate, max_bond_dim):
     # Reshape for SVD: (d_l * 2, 2 * d_r)
     theta_mat = theta_prime.reshape(d_l * 2, 2 * d_r)
 
-    # SVD
-    # Use standard numpy SVD.
-    U, S, Vh = np.linalg.svd(theta_mat, full_matrices=False)
+    # SVD using scipy for speed (LAPACK)
+    U, S, Vh = scipy.linalg.svd(theta_mat, full_matrices=False, lapack_driver='gesdd')
 
     # Truncate
     k = min(max_bond_dim, len(S))
-
-    # Keep only k largest
     U = U[:, :k]
     S = S[:k]
     Vh = Vh[:k, :]
 
-    # Normalize S to prevent numerical drift (explode/vanish)
-    # For MPS evolution, maintaining norm is tricky without canonical form management.
-    # But ensuring the state doesn't vanish/explode is good.
+    # Normalize S
     norm = np.linalg.norm(S)
-    if norm > 1e-12:
+    if norm > 1e-15:
         S = S / norm
 
-    # Push S to the right
+    # Push S to the right -> Right tensor becomes the new center
     Vh = np.diag(S) @ Vh
 
-    # Reshape back
+    # Reshape
     new_left = U.reshape(d_l, 2, k)
     new_right = Vh.reshape(k, 2, d_r)
 
@@ -120,16 +98,78 @@ class QPU:
         self.bond_dim = bond_dim
         self.gate_count = 0
         self.tensors = []
+        self.center = 0 # Initially canonical at 0
 
         # Initialize product state |00...0>
         # (1, 2, 1) tensors
+        # |0> state is (1, 0)
+        # Tensor structure: Left dim 1, Right dim 1.
+        # This is strictly canonical everywhere since it's a product state.
+        # We set center at 0 arbitrarily.
         if state == 'zeros':
-            for i in range(num_qubits):
-                t = np.zeros((1, 2, 1), dtype=np.complex128)
-                t[0, 0, 0] = 1.0
-                self.tensors.append(t)
+            self.reset_all()
+
+    def reset_all(self):
+        self.tensors = []
+        for i in range(self.num_qubits):
+            t = np.zeros((1, 2, 1), dtype=np.complex128)
+            t[0, 0, 0] = 1.0
+            self.tensors.append(t)
+        self.center = 0
+        self.gate_count = 0
+
+    def move_center(self, target):
+        if self.center == target:
+            return
+
+        # Sweep Right
+        if self.center < target:
+            for i in range(self.center, target):
+                # QR on tensors[i] to make it Left Orthogonal
+                # tensors[i]: (dL, 2, dR)
+                dL, d, dR = self.tensors[i].shape
+                mat = self.tensors[i].reshape(dL * d, dR)
+
+                # Q: (dL*d, K), R: (K, dR)
+                Q, R = scipy.linalg.qr(mat, mode='economic')
+
+                K = R.shape[0]
+                self.tensors[i] = Q.reshape(dL, d, K)
+
+                # Absorb R into next tensor
+                # tensors[i+1]: (dR, 2, dNext) -> (K, 2, dNext)
+                self.tensors[i+1] = np.tensordot(R, self.tensors[i+1], axes=(1, 0))
+
+            self.center = target
+
+        # Sweep Left
+        elif self.center > target:
+            for i in range(self.center, target, -1):
+                # LQ on tensors[i] to make it Right Orthogonal
+                # tensors[i]: (dL, 2, dR)
+                dL, d, dR = self.tensors[i].shape
+                mat = self.tensors[i].reshape(dL, d * dR)
+
+                # LQ = QR(M.T).T
+                # M.T: (d*dR, dL)
+                Q_t, R_t = scipy.linalg.qr(mat.T, mode='economic')
+                # Q_t: (d*dR, K), R_t: (K, dL)
+                # M = R_t.T @ Q_t.T = L @ Q
+                L = R_t.T # (dL, K)
+                Q = Q_t.T # (K, d*dR)
+
+                K = L.shape[1]
+                self.tensors[i] = Q.reshape(K, d, dR)
+
+                # Absorb L into prev tensor
+                # tensors[i-1]: (dPrev, 2, dL) -> (dPrev, 2, K)
+                self.tensors[i-1] = np.tensordot(self.tensors[i-1], L, axes=(2, 0))
+
+            self.center = target
 
     def apply_1q(self, gate, index):
+        # 1-qubit gates preserve orthogonality, so center doesn't strictly need to move.
+        # Just apply locally.
         self.tensors[index] = contract_1q(self.tensors[index], gate)
         self.gate_count += 1
 
@@ -137,10 +177,71 @@ class QPU:
         if index2 != index1 + 1:
             raise ValueError("Only nearest neighbor gates supported currently")
 
+        # To optimize SVD truncation, the center should be at the bond being cut.
+        # Moving center to index1 puts the weights in index1.
+        self.move_center(index1)
+
+        # contract_2q_svd splits weights into S, and pushes S to Vh (right tensor).
+        # So left becomes Left-Orth, Right becomes Center.
         left, right = contract_2q_svd(self.tensors[index1], self.tensors[index2], gate, self.bond_dim)
+
         self.tensors[index1] = left
         self.tensors[index2] = right
+
+        # Center is now at index2
+        self.center = index2
         self.gate_count += 1
+
+    def measure(self, index):
+        """
+        Projective measurement in Z-basis.
+        Returns 0 or 1.
+        """
+        # Move center to index so that tensor represents local state correctly normalized
+        self.move_center(index)
+
+        T = self.tensors[index] # (dL, 2, dR)
+
+        # Prob(0) = sum(|T[:, 0, :]|^2)
+        p0 = np.sum(np.abs(T[:, 0, :])**2)
+        p1 = 1.0 - p0
+
+        # Numerical stability check
+        if p0 < 0: p0 = 0.0
+        if p0 > 1: p0 = 1.0
+
+        outcome = 0
+        if np.random.random() > p0:
+            outcome = 1
+
+        # Collapse state
+        # If 0, zero out the 1-component
+        # If 1, zero out the 0-component
+        if outcome == 0:
+            T[:, 1, :] = 0.0
+            norm = np.sqrt(p0)
+        else:
+            T[:, 0, :] = 0.0
+            norm = np.sqrt(1.0 - p0) # Recalc from p0 to avoid slight drift
+
+        if norm < 1e-15:
+            # Should not happen if prob > 0
+            norm = 1.0
+
+        T /= norm
+        self.tensors[index] = T
+        # Center remains at index
+
+        return outcome
+
+    def reset(self, index):
+        """
+        Resets qubit to |0>.
+        Effectively: Measure. If 1, apply X.
+        """
+        m = self.measure(index)
+        if m == 1:
+            self.x(index)
 
     # Gate wrappers
     def h(self, idx): self.apply_1q(H, idx)
@@ -157,14 +258,12 @@ class QPU:
         if c == t - 1:
             self.apply_2q(CX, c, t)
         elif t == c - 1:
-            # CX(j, i) = (H_j H_i) CX(i, j) (H_j H_i)
             self.h(c)
             self.h(t)
             self.apply_2q(CX, t, c)
             self.h(c)
             self.h(t)
         else:
-             # Just raise error if not nearest neighbor
              raise ValueError(f"CX not supported for non-adjacent qubits {c}, {t}")
 
     def cz(self, i, j):
@@ -184,7 +283,6 @@ class QPU:
              raise ValueError(f"SWAP not supported for non-adjacent qubits {i}, {j}")
 
     def memory_usage(self):
-        # Estimate bytes
         mem = 0
         for t in self.tensors:
             mem += t.nbytes

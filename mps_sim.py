@@ -94,6 +94,10 @@ def contract_2q_svd(left_tensor, right_tensor, gate, max_bond_dim):
 
 class QPU:
     def __init__(self, num_qubits, bond_dim, state='zeros'):
+        # Ensure independent RNG for each QPU instance
+        # This fixes issues with multiprocessing forking where RNG state might be duplicated
+        self.rng = np.random.default_rng()
+
         self.num_qubits = num_qubits
         self.bond_dim = bond_dim
         self.gate_count = 0
@@ -211,7 +215,7 @@ class QPU:
         if p0 > 1: p0 = 1.0
 
         outcome = 0
-        if np.random.random() > p0:
+        if self.rng.random() > p0:
             outcome = 1
 
         # Collapse state

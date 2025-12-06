@@ -2,9 +2,13 @@ import gradio as gr
 import time
 import multiprocessing
 from backend import SimulationManager
+import atexit
 
 # Global Manager
 manager = SimulationManager()
+
+# Graceful Shutdown
+atexit.register(manager.stop_simulation)
 
 def start_run(bond_dim, num_qubits, num_cores, code):
     if not code.strip():

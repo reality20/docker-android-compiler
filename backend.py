@@ -148,16 +148,11 @@ class SimulationManager:
 
     def stop_simulation(self):
         self.stop_event.set()
-        # Wait for processes to exit gracefully
-        for p in self.processes:
-            p.join(timeout=1) # Wait for 1 second
-
-        # Force terminate any stubborn processes
+        # Give them a moment to stop gracefully via wrapper check
+        time.sleep(0.1)
         for p in self.processes:
             if p.is_alive():
                 p.terminate()
-                p.join() # Ensure termination is complete
-
         self.processes = []
 
     def is_running(self):

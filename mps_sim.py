@@ -1,293 +1,247 @@
 import numpy as np
-import scipy.linalg
-from numba import jit
-
-# Define Gates
-I = np.array([[1, 0], [0, 1]], dtype=np.complex128)
-X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
-Y = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
-Z = np.array([[1, 0], [0, -1]], dtype=np.complex128)
-H = np.array([[1, 1], [1, -1]], dtype=np.complex128) / np.sqrt(2)
-S = np.array([[1, 0], [0, 1j]], dtype=np.complex128)
-T = np.array([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=np.complex128)
-
-def rx(theta):
-    return np.array([[np.cos(theta/2), -1j*np.sin(theta/2)],
-                     [-1j*np.sin(theta/2), np.cos(theta/2)]], dtype=np.complex128)
-
-def ry(theta):
-    return np.array([[np.cos(theta/2), -np.sin(theta/2)],
-                     [np.sin(theta/2), np.cos(theta/2)]], dtype=np.complex128)
-
-def rz(theta):
-    return np.array([[np.exp(-1j*theta/2), 0],
-                     [0, np.exp(1j*theta/2)]], dtype=np.complex128)
-
-# 2-qubit gates
-CX = np.array([[1, 0, 0, 0],
-               [0, 1, 0, 0],
-               [0, 0, 0, 1],
-               [0, 0, 1, 0]], dtype=np.complex128).reshape(2, 2, 2, 2)
-
-CZ = np.array([[1, 0, 0, 0],
-               [0, 1, 0, 0],
-               [0, 0, 1, 0],
-               [0, 0, 0, -1]], dtype=np.complex128).reshape(2, 2, 2, 2)
-
-SWAP = np.array([[1, 0, 0, 0],
-                 [0, 0, 1, 0],
-                 [0, 1, 0, 0],
-                 [0, 0, 0, 1]], dtype=np.complex128).reshape(2, 2, 2, 2)
-
-def contract_1q(tensor, gate):
-    # tensor: (D_L, 2, D_R)
-    # gate: (2, 2)
-    # out: (D_L, 2, D_R)
-    # tensordot axes=([1], [1]) contracts physical dim.
-    # tensor(i, l, j) * gate(k, l) -> (i, j, k). Transpose to (i, k, j)
-    temp = np.tensordot(tensor, gate, axes=([1], [1]))
-    return np.transpose(temp, (0, 2, 1))
-
-def contract_2q_svd(left_tensor, right_tensor, gate, max_bond_dim):
-    # left_tensor: (D_L, 2, D_mid) - CENTER (or implicitly absorbed)
-    # right_tensor: (D_mid, 2, D_R)
-    # gate: (2, 2, 2, 2) (out_l, out_r, in_l, in_r)
-
-    # Merge tensors
-    theta = np.tensordot(left_tensor, right_tensor, axes=(2, 0)) # (D_L, 2, 2, D_R)
-
-    # Apply gate
-    # theta(n, i, j, m) * gate(k, l, i, j) -> (n, m, k, l)
-    theta_prime = np.tensordot(theta, gate, axes=([1, 2], [2, 3]))
-
-    # Transpose to (n, k, l, m) -> (d_l, out_l, out_r, d_r)
-    theta_prime = np.transpose(theta_prime, (0, 2, 3, 1))
-
-    d_l = theta_prime.shape[0]
-    d_r = theta_prime.shape[3]
-
-    # Reshape for SVD: (d_l * 2, 2 * d_r)
-    theta_mat = theta_prime.reshape(d_l * 2, 2 * d_r)
-
-    # SVD using scipy for speed (LAPACK)
-    U, S, Vh = scipy.linalg.svd(theta_mat, full_matrices=False, lapack_driver='gesdd')
-
-    # Truncate
-    k = min(max_bond_dim, len(S))
-    U = U[:, :k]
-    S = S[:k]
-    Vh = Vh[:k, :]
-
-    # Normalize S
-    norm = np.linalg.norm(S)
-    if norm > 1e-15:
-        S = S / norm
-
-    # Push S to the right -> Right tensor becomes the new center
-    Vh = np.diag(S) @ Vh
-
-    # Reshape
-    new_left = U.reshape(d_l, 2, k)
-    new_right = Vh.reshape(k, 2, d_r)
-
-    return new_left, new_right
+import kernels
+from kernels import (
+    GATE_I, GATE_X, GATE_Y, GATE_Z, GATE_H, GATE_S, GATE_T,
+    GATE_RX, GATE_RY, GATE_RZ, GATE_CX, GATE_CZ, GATE_SWAP,
+    GATE_MEASURE, GATE_RESET
+)
 
 class QPU:
-    def __init__(self, num_qubits, bond_dim, state='zeros'):
-        # Ensure independent RNG for each QPU instance
-        # This fixes issues with multiprocessing forking where RNG state might be duplicated
+    def __init__(self, num_qubits, bond_dim=2, state='zeros'):
+        self.num_qubits = num_qubits
+        self.bond_dim = 2 # Fixed to 2 for optimization
         self.rng = np.random.default_rng()
 
-        self.num_qubits = num_qubits
-        self.bond_dim = bond_dim
+        # 3D Topology Dimensions
+        # We define a cubic bounding box
+        s = int(np.ceil(num_qubits**(1/3)))
+        if s == 0: s = 1
+        self.L = s
+        self.W = s
+        self.H = s
+
+        # Vidal Form State
+        # Gammas: (N, 2, 2, 2)
+        # Lambdas: (N+1, 2)
+        self.gammas = np.zeros((num_qubits, 2, 2, 2), dtype=np.complex128)
+        self.lambdas = np.zeros((num_qubits + 1, 2), dtype=np.float64)
+
+        # Initialize to |0...0>
+        # G[i, 0, 0, 0] = 1.0
+        # L[i] = [1.0, 0.0]
+        self.gammas[:, 0, 0, 0] = 1.0
+        self.lambdas[:, 0] = 1.0
+
+        # Swap Network Mappings
+        self.ptr = np.arange(num_qubits, dtype=np.int32) # Logical q -> Physical index
+        self.qubits = np.arange(num_qubits, dtype=np.int32) # Physical index -> Logical q
+
+        # Command Buffer
+        # Each instruction: [OpCode, PhysQ1, PhysQ2, ParamIdx]
+        self.instr_list = []
+        self.param_list = []
         self.gate_count = 0
-        self.tensors = []
-        self.center = 0 # Initially canonical at 0
 
-        # Initialize product state |00...0>
-        # (1, 2, 1) tensors
-        # |0> state is (1, 0)
-        # Tensor structure: Left dim 1, Right dim 1.
-        # This is strictly canonical everywhere since it's a product state.
-        # We set center at 0 arbitrarily.
-        if state == 'zeros':
-            self.reset_all()
+    def _get_coords(self, logical_idx):
+        # Map logical index to x,y,z
+        H = self.H
+        W = self.W
+        z = logical_idx % H
+        y = (logical_idx // H) % W
+        x = logical_idx // (H * W)
+        return x, y, z
 
-    def reset_all(self):
-        self.tensors = []
-        for i in range(self.num_qubits):
-            t = np.zeros((1, 2, 1), dtype=np.complex128)
-            t[0, 0, 0] = 1.0
-            self.tensors.append(t)
-        self.center = 0
-        self.gate_count = 0
+    def _are_neighbors(self, q1, q2):
+        # Check 3D adjacency
+        x1, y1, z1 = self._get_coords(q1)
+        x2, y2, z2 = self._get_coords(q2)
+        dist = abs(x1-x2) + abs(y1-y2) + abs(z1-z2)
+        return dist == 1
 
-    def move_center(self, target):
-        if self.center == target:
+    def flush(self):
+        if not self.instr_list:
             return
 
-        # Sweep Right
-        if self.center < target:
-            for i in range(self.center, target):
-                # QR on tensors[i] to make it Left Orthogonal
-                # tensors[i]: (dL, 2, dR)
-                dL, d, dR = self.tensors[i].shape
-                mat = self.tensors[i].reshape(dL * d, dR)
+        instrs = np.array(self.instr_list, dtype=np.int32)
+        params = np.array(self.param_list, dtype=np.float64)
 
-                # Q: (dL*d, K), R: (K, dR)
-                Q, R = scipy.linalg.qr(mat, mode='economic')
+        kernels.run_simulation_kernel(self.gammas, self.lambdas, instrs, params)
 
-                K = R.shape[0]
-                self.tensors[i] = Q.reshape(dL, d, K)
+        self.instr_list = []
+        self.param_list = []
 
-                # Absorb R into next tensor
-                # tensors[i+1]: (dR, 2, dNext) -> (K, 2, dNext)
-                self.tensors[i+1] = np.tensordot(R, self.tensors[i+1], axes=(1, 0))
+    def _route(self, p1, p2):
+        # Route physical qubits p1 and p2 to be adjacent
+        if p1 == p2:
+            return p1, p2
 
-            self.center = target
+        # We want to bring them adjacent.
+        # Determine direction
+        if p1 > p2:
+            p1, p2 = p2, p1
 
-        # Sweep Left
-        elif self.center > target:
-            for i in range(self.center, target, -1):
-                # LQ on tensors[i] to make it Right Orthogonal
-                # tensors[i]: (dL, 2, dR)
-                dL, d, dR = self.tensors[i].shape
-                mat = self.tensors[i].reshape(dL, d * dR)
+        # Now p1 < p2
+        # Move p2 down to p1+1
+        while p2 > p1 + 1:
+            sw_left = p2 - 1
+            sw_right = p2
 
-                # LQ = QR(M.T).T
-                # M.T: (d*dR, dL)
-                Q_t, R_t = scipy.linalg.qr(mat.T, mode='economic')
-                # Q_t: (d*dR, K), R_t: (K, dL)
-                # M = R_t.T @ Q_t.T = L @ Q
-                L = R_t.T # (dL, K)
-                Q = Q_t.T # (K, d*dR)
+            # Emit SWAP
+            self.instr_list.append([GATE_SWAP, sw_left, sw_right, -1])
+            self.gate_count += 1
 
-                K = L.shape[1]
-                self.tensors[i] = Q.reshape(K, d, dR)
+            # Update Map
+            l_left = self.qubits[sw_left]
+            l_right = self.qubits[sw_right]
 
-                # Absorb L into prev tensor
-                # tensors[i-1]: (dPrev, 2, dL) -> (dPrev, 2, K)
-                self.tensors[i-1] = np.tensordot(self.tensors[i-1], L, axes=(2, 0))
+            self.qubits[sw_left] = l_right
+            self.qubits[sw_right] = l_left
+            self.ptr[l_left] = sw_right
+            self.ptr[l_right] = sw_left
 
-            self.center = target
+            p2 -= 1
 
-    def apply_1q(self, gate, index):
-        # 1-qubit gates preserve orthogonality, so center doesn't strictly need to move.
-        # Just apply locally.
-        self.tensors[index] = contract_1q(self.tensors[index], gate)
+        return p1, p2
+
+    def apply_1q(self, op, q, param=None):
+        if q < 0 or q >= self.num_qubits:
+            raise ValueError(f"Qubit {q} out of bounds")
+
+        p = self.ptr[q]
+
+        pidx = -1
+        if param is not None:
+            pidx = len(self.param_list)
+            self.param_list.append(param)
+
+        self.instr_list.append([op, p, -1, pidx])
         self.gate_count += 1
 
-    def apply_2q(self, gate, index1, index2):
-        if index2 != index1 + 1:
-            raise ValueError("Only nearest neighbor gates supported currently")
+    def apply_2q(self, op, q1, q2, param=None):
+        if q1 < 0 or q1 >= self.num_qubits or q2 < 0 or q2 >= self.num_qubits:
+            raise ValueError("Qubit index out of bounds")
 
-        # To optimize SVD truncation, the center should be at the bond being cut.
-        # Moving center to index1 puts the weights in index1.
-        self.move_center(index1)
+        # Check Topology
+        if not self._are_neighbors(q1, q2):
+            raise ValueError(f"Qubits {q1} and {q2} are not neighbors in 3D Hypercube topology")
 
-        # contract_2q_svd splits weights into S, and pushes S to Vh (right tensor).
-        # So left becomes Left-Orth, Right becomes Center.
-        left, right = contract_2q_svd(self.tensors[index1], self.tensors[index2], gate, self.bond_dim)
+        p1 = self.ptr[q1]
+        p2 = self.ptr[q2]
 
-        self.tensors[index1] = left
-        self.tensors[index2] = right
+        # Route
+        p1, p2 = self._route(p1, p2)
 
-        # Center is now at index2
-        self.center = index2
+        # Apply Gate
+        # p1 is left, p2 is right (p2 = p1+1)
+        pidx = -1
+        if param is not None:
+            pidx = len(self.param_list)
+            self.param_list.append(param)
+
+        self.instr_list.append([op, p1, p2, pidx])
         self.gate_count += 1
 
-    def measure(self, index):
-        """
-        Projective measurement in Z-basis.
-        Returns 0 or 1.
-        """
-        # Move center to index so that tensor represents local state correctly normalized
-        self.move_center(index)
+    def measure(self, q):
+        self.flush()
 
-        T = self.tensors[index] # (dL, 2, dR)
+        p = self.ptr[q]
 
-        # Prob(0) = sum(|T[:, 0, :]|^2)
-        p0 = np.sum(np.abs(T[:, 0, :])**2)
-        p1 = 1.0 - p0
+        # Calculate prob(0) locally
+        # T = diag(L[p]) * G[p] * diag(L[p+1])
+        # We need to construct this tensor.
+        # But we only need T[:, 0, :] and T[:, 1, :] norm.
 
-        # Numerical stability check
-        if p0 < 0: p0 = 0.0
-        if p0 > 1: p0 = 1.0
+        L_left = self.lambdas[p]
+        G = self.gammas[p]
+        L_right = self.lambdas[p+1]
+
+        # Construct T
+        # T(a, i, b) = L_left(a) * G(a, i, b) * L_right(b)
+
+        p0 = 0.0
+        p1 = 0.0
+
+        # We iterate to sum |T|^2
+        # Since bond dim is 2, it's fast.
+        for a in range(2):
+            for b in range(2):
+                # i=0
+                val0 = L_left[a] * G[a, 0, b] * L_right[b]
+                p0 += np.abs(val0)**2
+
+                # i=1
+                val1 = L_left[a] * G[a, 1, b] * L_right[b]
+                p1 += np.abs(val1)**2
+
+        # Normalize
+        total = p0 + p1
+        if total < 1e-15:
+             # Should not happen
+             p0 = 0.5
+        else:
+             p0 /= total
 
         outcome = 0
         if self.rng.random() > p0:
             outcome = 1
 
-        # Collapse state
-        # If 0, zero out the 1-component
-        # If 1, zero out the 0-component
+        # Collapse State
+        # If 0, zero out i=1. Re-normalize.
+        # We modify G in place.
+
         if outcome == 0:
-            T[:, 1, :] = 0.0
+            G[:, 1, :] = 0.0
             norm = np.sqrt(p0)
         else:
-            T[:, 0, :] = 0.0
-            norm = np.sqrt(1.0 - p0) # Recalc from p0 to avoid slight drift
+            G[:, 0, :] = 0.0
+            norm = np.sqrt(1.0 - p0)
 
-        if norm < 1e-15:
-            # Should not happen if prob > 0
-            norm = 1.0
+        if norm > 1e-15:
+            G /= norm
 
-        T /= norm
-        self.tensors[index] = T
-        # Center remains at index
+        # Since we modified G in python, we don't need to push to kernel.
+        # The kernel reads 'gammas' array which is shared memory (numpy array).
+        # Wait, if kernel was running, it would be an issue. But we flushed.
 
         return outcome
 
-    def reset(self, index):
-        """
-        Resets qubit to |0>.
-        Effectively: Measure. If 1, apply X.
-        """
-        m = self.measure(index)
+    def reset(self, q):
+        m = self.measure(q)
         if m == 1:
-            self.x(index)
+            self.x(q)
 
-    # Gate wrappers
-    def h(self, idx): self.apply_1q(H, idx)
-    def s(self, idx): self.apply_1q(S, idx)
-    def t(self, idx): self.apply_1q(T, idx)
-    def x(self, idx): self.apply_1q(X, idx)
-    def y(self, idx): self.apply_1q(Y, idx)
-    def z(self, idx): self.apply_1q(Z, idx)
-    def rx(self, idx, theta): self.apply_1q(rx(theta), idx)
-    def ry(self, idx, theta): self.apply_1q(ry(theta), idx)
-    def rz(self, idx, theta): self.apply_1q(rz(theta), idx)
+    def reset_all(self):
+        # Reset everything
+        self.flush() # Ensure any pending are done (though we clear them)
+        self.instr_list = []
+        self.param_list = []
 
-    def cx(self, c, t):
-        if c == t - 1:
-            self.apply_2q(CX, c, t)
-        elif t == c - 1:
-            self.h(c)
-            self.h(t)
-            self.apply_2q(CX, t, c)
-            self.h(c)
-            self.h(t)
-        else:
-             raise ValueError(f"CX not supported for non-adjacent qubits {c}, {t}")
+        self.gammas.fill(0.0)
+        self.gammas[:, 0, 0, 0] = 1.0
 
-    def cz(self, i, j):
-        if j == i + 1:
-            self.apply_2q(CZ, i, j)
-        elif i == j + 1:
-            self.apply_2q(CZ, j, i)
-        else:
-             raise ValueError(f"CZ not supported for non-adjacent qubits {i}, {j}")
+        self.lambdas.fill(0.0)
+        self.lambdas[:, 0] = 1.0
 
-    def swap(self, i, j):
-        if j == i + 1:
-            self.apply_2q(SWAP, i, j)
-        elif i == j + 1:
-            self.apply_2q(SWAP, j, i)
-        else:
-             raise ValueError(f"SWAP not supported for non-adjacent qubits {i}, {j}")
+        self.ptr = np.arange(self.num_qubits, dtype=np.int32)
+        self.qubits = np.arange(self.num_qubits, dtype=np.int32)
+        self.gate_count = 0
 
     def memory_usage(self):
-        mem = 0
-        for t in self.tensors:
-            mem += t.nbytes
-        return mem
+        return self.gammas.nbytes + self.lambdas.nbytes + \
+               (len(self.instr_list) * 16) + (len(self.param_list) * 8)
+
+    # Gate Wrappers
+    def h(self, q): self.apply_1q(GATE_H, q)
+    def s(self, q): self.apply_1q(GATE_S, q)
+    def t(self, q): self.apply_1q(GATE_T, q)
+    def x(self, q): self.apply_1q(GATE_X, q)
+    def y(self, q): self.apply_1q(GATE_Y, q)
+    def z(self, q): self.apply_1q(GATE_Z, q)
+    def rx(self, q, theta): self.apply_1q(GATE_RX, q, theta)
+    def ry(self, q, theta): self.apply_1q(GATE_RY, q, theta)
+    def rz(self, q, theta): self.apply_1q(GATE_RZ, q, theta)
+
+    def cx(self, c, t): self.apply_2q(GATE_CX, c, t)
+    def cz(self, c, t): self.apply_2q(GATE_CZ, c, t)
+    def swap(self, c, t): self.apply_2q(GATE_SWAP, c, t)
+

@@ -35,83 +35,58 @@ def update_status():
 
     return state_str, elapsed, gps_core, mem, total_gates, output_log
 
-default_code = """# Example Simulation
-# This demo showcases all available QPU operations:
-# 1-qubit: h, s, t, x, y, z, rx, ry, rz
-# 2-qubit: cx, cz, swap
-# Measurement: measure(i)
-# Reset: reset(i), reset_all()
+default_code = """# Example Simulation: 3D Quantum Walk
+# This demo showcases the 3D Hypercube topology.
 import random
-import math
+import time
 
 core = qpu._core_id
-print(f"Core {core}: Starting comprehensive demo.")
+print(f"Core {core}: Starting 3D Quantum Walk on {qpu.num_qubits} qubits.")
+print(f"Topology: {qpu.L} x {qpu.W} x {qpu.H}")
 
-# 1. State Preparation & Single Qubit Gates
-# Iterate through all single qubit gates
+# Check neighbors of qubit 0
+print(f"Core {core}: Neighbors of 0: {[i for i in range(qpu.num_qubits) if qpu._are_neighbors(0, i)]}")
+
+# 1. Initialize
+# Apply Hadamard to all to create superposition
 for i in range(qpu.num_qubits):
-    qpu.x(i)       # X
-    qpu.h(i)       # Hadamard
-    qpu.s(i)       # S phase
-    qpu.t(i)       # T phase
-    qpu.y(i)       # Y
-    qpu.z(i)       # Z
-    qpu.rx(i, 0.1) # RX
-    qpu.ry(i, 0.2) # RY
-    qpu.rz(i, 0.3) # RZ
+    qpu.h(i)
 
-# 2. Entanglement & Two Qubit Gates
-# Create a chain of entanglement
-for i in range(qpu.num_qubits - 1):
-    qpu.cx(i, i+1)   # CNOT
-    qpu.cz(i, i+1)   # CZ
-    qpu.swap(i, i+1) # SWAP
-    qpu.swap(i, i+1) # Swap back to restore order
+# 2. Random Walk in 3D
+# We pick a qubit and try to interact with a neighbor
+steps = 1000
+for s in range(steps):
+    q = random.randint(0, qpu.num_qubits - 1)
 
-# 3. Measurement & Feedback
-# Measure the first qubit
+    # Try to find a valid neighbor
+    neighbors = []
+    # Since we don't have a public neighbor list, we scan (slow for demo, but checks logic)
+    # Actually, let's just pick another random one and try-catch
+
+    target = random.randint(0, qpu.num_qubits - 1)
+
+    try:
+        if q != target:
+            qpu.cx(q, target)
+    except ValueError:
+        # Not neighbors
+        pass
+
+# 3. Measurement
 m = qpu.measure(0)
-print(f"Core {core}: Measured qubit 0 = {m}")
+print(f"Core {core}: Measurement of q0 = {m}")
 
-# Conditional logic
-if m == 1:
-    qpu.x(1) # Corrective flip on neighbor
-
-# 4. Reset
-qpu.reset(0) # Reset qubit 0 to |0>
-m_check = qpu.measure(0)
-if m_check != 0:
-    print(f"Core {core}: Warning - Reset failed (probabilistic?)")
-
-# 5. Global Reset
-qpu.reset_all() # Reset entire register to |0...0>
-
-# 6. Random Circuit Loop
-# Run a random circuit using all gates
-for step in range(100):
-    q = random.randint(0, qpu.num_qubits - 2)
-
-    # Randomly select a gate
-    op = random.choice(['h', 's', 't', 'x', 'y', 'z', 'rx', 'ry', 'rz', 'cx', 'cz', 'swap'])
-
-    if op in ['rx', 'ry', 'rz']:
-        getattr(qpu, op)(q, random.random())
-    elif op in ['cx', 'cz', 'swap']:
-        getattr(qpu, op)(q, q+1)
-    else:
-        getattr(qpu, op)(q)
-
-mem_bytes = qpu.memory_usage()
-print(f"Core {core}: Finished. Approx memory: {mem_bytes} bytes")
+print(f"Core {core}: Finished.")
 """
 
 with gr.Blocks(title="QPU Simulator") as demo:
-    gr.Markdown("# QPU Simulator (MPS Backend)")
+    gr.Markdown("# QPU Simulator (MPS Backend - 3D Hypercube)")
+    gr.Markdown("This simulator uses a Matrix Product State backend optimized for a 3D Hypercube topology using Numba.")
 
     with gr.Row():
         with gr.Column(scale=1):
-            bond_dim = gr.Number(label="Bond Dimension", value=16, precision=0)
-            num_qubits = gr.Number(label="Number of Qubits", value=10, precision=0)
+            bond_dim = gr.Number(label="Bond Dimension (Fixed to 2)", value=2, precision=0, interactive=False)
+            num_qubits = gr.Number(label="Number of Qubits", value=27, precision=0) # 3x3x3
             # Default to all cores
             default_cores = multiprocessing.cpu_count()
             num_cores = gr.Number(label="Number of Cores", value=default_cores, precision=0)

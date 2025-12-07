@@ -37,6 +37,7 @@ def simulation_worker(config, user_code, status_queue, stop_event):
 
     try:
         # Initialize QPU
+        # bond_dim is ignored in new QPU (fixed to 2), but passed for compatibility
         qpu = QPU(config['num_qubits'], config['bond_dim'])
 
         # Wrapper for QPU to check stop signal
@@ -95,6 +96,9 @@ def simulation_worker(config, user_code, status_queue, stop_event):
 
         # Execute User Code
         exec(user_code, local_scope)
+
+        # Ensure all commands are flushed at the end
+        qpu.flush()
 
         # Final report
         status_queue.put({

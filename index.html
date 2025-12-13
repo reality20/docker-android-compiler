@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QPU-1 Control Interface</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+    <!-- CodeMirror -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/codemirror.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/theme/dracula.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/mode/python/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.5/addon/edit/closebrackets.min.js"></script>
+
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --header-bg: #161b22;
+            --text-color: #c9d1d9;
+            --accent-color: #58a6ff;
+            --success-color: #238636;
+            --danger-color: #da3633;
+            --border-color: #30363d;
+            --panel-bg: #161b22;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: 'Roboto', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            overflow: hidden;
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        /* Header */
+        header {
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 0 20px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand h1 {
+            font-size: 20px;
+            font-weight: 700;
+            margin: 0;
+            color: var(--accent-color);
+            letter-spacing: 1px;
+        }
+
+        .status-badge {
+            background: #1f6feb;
+            color: white;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        #active-cores-display {
+             font-size: 12px;
+             color: #238636;
+             font-weight: bold;
+             margin-left: 10px;
+             display: none;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .select-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+        }
+
+        /* SVG Mini Visualizer next to dropdown */
+        #core-mini-viz {
+            width: 24px;
+            height: 24px;
+            display: inline-block;
+        }
+
+        select {
+            background: var(--bg-color);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            padding: 8px;
+            border-radius: 6px;
+            font-family: 'Roboto', sans-serif;
+            cursor: pointer;
+        }
+
+        button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            border: 1px solid transparent;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-run {
+            background-color: var(--success-color);
+            color: white;
+        }
+        .btn-run:hover {
+            background-color: #2ea043;
+        }
+
+        .btn-kill {
+            background-color: var(--danger-color);
+            color: white;
+        }
+        .btn-kill:hover {
+            background-color: #f85149;
+        }
+
+        /* Main Layout */
+        #main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Sidebar Tabs (Optional, but user asked for tabs) */
+        /* We will implement tabs as a top bar within the content area or vertical sidebar */
+        /* Let's go with vertical sidebar for "modern" look */
+        .sidebar {
+            width: 60px;
+            background-color: var(--header-bg);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding-top: 20px;
+            gap: 20px;
+        }
+
+        .tab-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: var(--text-color);
+            cursor: pointer;
+            transition: background 0.2s;
+            background: transparent;
+            border: none;
+        }
+
+        .tab-btn.active {
+            background: rgba(88, 166, 255, 0.2);
+            color: var(--accent-color);
+        }
+
+        .tab-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .tab-icon {
+            font-size: 20px;
+        }
+
+        /* Content Area */
+        .content-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            background: var(--bg-color);
+        }
+
+        /* Collapsible Panels Logic */
+        /* We will use a split pane approach for Editor and Output */
+
+        .panel-container {
+            display: flex;
+            height: 100%;
+            width: 100%;
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-color);
+            transition: width 0.3s;
+        }
+
+        .panel-header {
+            padding: 10px 15px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: #21262d;
+            cursor: pointer;
+        }
+
+        .panel-content {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Specific Panels */
+        #editor-panel {
+            flex: 1;
+            min-width: 300px;
+        }
+
+        #results-panel {
+            width: 40%;
+            min-width: 300px;
+            border-right: none;
+        }
+
+        /* Attributes and Status overlays or tabs? */
+        /* User asked for tabs. Let's make the Right Panel switchable */
+
+        .tab-content {
+            display: none;
+            height: 100%;
+            flex-direction: column;
+        }
+        .tab-content.active {
+            display: flex;
+        }
+
+        /* CodeMirror Customization */
+        .CodeMirror {
+            height: 100% !important;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            background-color: var(--bg-color) !important;
+        }
+
+        /* Output Styling */
+        .output-log {
+            padding: 15px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: #e6edf3;
+            white-space: pre-wrap;
+            overflow-y: auto;
+            height: 100%;
+        }
+
+        .output-error {
+            color: #ff7b72;
+            background: rgba(218, 54, 51, 0.1);
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+
+        /* Attributes List */
+        .attr-list {
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .attr-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .attr-key {
+            color: #8b949e;
+        }
+
+        .attr-val {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-color);
+        }
+
+        /* QPU Visualizer Placeholder */
+        .qpu-grid {
+            position: relative;
+            padding: 20px;
+            overflow: auto;
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: radial-gradient(circle at center, #1f242e 0%, #161b22 100%);
+        }
+
+        #visualizer-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+
+        .qubit-node {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #21262d;
+            border: 2px solid #30363d;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 10px;
+            color: #8b949e;
+            position: absolute;
+            z-index: 1;
+            transition: all 0.5s ease;
+        }
+
+        .qubit-node.active {
+            border-color: var(--accent-color);
+            background: rgba(88, 166, 255, 0.1);
+            color: white;
+            box-shadow: 0 0 15px rgba(88, 166, 255, 0.5);
+        }
+
+        /* Collapse button */
+        .collapse-btn {
+            background: none;
+            border: none;
+            color: inherit;
+            cursor: pointer;
+            padding: 0;
+        }
+
+        /* Loading overlay */
+        #loading {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #30363d;
+            border-top: 4px solid var(--accent-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+    </style>
+</head>
+<body>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div style="font-family: 'JetBrains Mono'">EXECUTING ON QPU-1...</div>
+    </div>
+
+    <div id="app">
+        <header>
+            <div class="brand">
+                <div style="width:24px;height:24px;background:var(--accent-color);clip-path:polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);"></div>
+                <h1>QPU-1</h1>
+                <span class="status-badge">ONLINE</span>
+                <span id="active-cores-display">Active: 100 (0.1%)</span>
+            </div>
+
+            <div class="controls">
+                <label style="font-size: 12px; color: #8b949e;">ALLOCATION</label>
+                <div class="select-container">
+                    <svg id="core-mini-viz" viewBox="0 0 24 24">
+                        <!-- Content updated via JS -->
+                    </svg>
+                    <select id="cores-select" onchange="updateActiveDisplay()">
+                        <option value="10">10 Cores (Standard)</option>
+                        <option value="100">100 Cores (High Perf)</option>
+                        <option value="1000">1,000 Cores (Cluster)</option>
+                        <option value="100000">100,000 Cores (HPC)</option>
+                    </select>
+                </div>
+
+                <div style="width: 1px; height: 20px; background: var(--border-color); margin: 0 10px;"></div>
+
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                     <label style="font-size: 10px; display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                        <input type="checkbox" id="entangle-check" checked> Allow Inter-Core Entanglement
+                     </label>
+                     <input type="text" id="lib-install" placeholder="Install libs (comma sep)" style="background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-color); font-size: 10px; padding: 2px 5px; border-radius: 4px;">
+                </div>
+
+                <div style="width: 1px; height: 20px; background: var(--border-color); margin: 0 10px;"></div>
+
+                <button class="btn-kill" onclick="killProcess()">
+                    <span>■</span> Kill
+                </button>
+                <button class="btn-run" onclick="runCode()">
+                    <span>▶</span> EXECUTE
+                </button>
+            </div>
+        </header>
+
+        <div id="main-container">
+            <div class="sidebar">
+                <button class="tab-btn active" onclick="switchTab('editor-view')" title="Code Editor">
+                    <span class="tab-icon">&lt;/&gt;</span>
+                </button>
+                <button class="tab-btn" onclick="switchTab('attributes-view')" title="System Attributes">
+                    <span class="tab-icon">ℹ</span>
+                </button>
+                <button class="tab-btn" onclick="switchTab('visualizer-view')" title="QPU Visualizer">
+                    <span class="tab-icon">∿</span>
+                </button>
+                <button class="tab-btn" onclick="switchTab('docs-view')" title="Documentation">
+                    <span class="tab-icon">?</span>
+                </button>
+            </div>
+
+            <div class="panel-container">
+                <!-- Left Panel: Always Code Editor (unless hidden?) -->
+                <!-- Actually, let's keep Editor always visible on left, and switchable Right Panel -->
+
+                <div class="panel" id="editor-panel">
+                    <div class="panel-header">
+                        <span>Quantum Source</span>
+                        <button class="collapse-btn" onclick="togglePanel('editor-panel')">[-]</button>
+                    </div>
+                    <div class="panel-content">
+                        <textarea id="code-editor"># QPU-1 Native Execution Code
+# Access the QPU via the 'qpu' object.
+
+import time
+
+# Use the 'qpu.cores' property to iterate over ACTIVE cores
+print(f"Initializing process on {len(qpu.cores)} active cores...")
+print(f"Attributes: {qpu.attributes}\n")
+
+# Demonstration of Entanglement across cores (if available)
+try:
+    c0 = qpu.get_core(0)
+    c1 = qpu.get_core(1)
+
+    # Entangle Core 0 Qubit 0 with Core 1 Qubit 0
+    print("\nEntangling Core 0 (q0) and Core 1 (q0)...")
+
+    c0.h(0) # Hadamard on C0
+    # CNOT from C0(0) to C1(0).
+    # Since they are different cores, we use entangle_cnot
+    c0.entangle_cnot(0, c1, 0)
+
+    print("Entanglement complete. Measuring...")
+
+    m0 = c0.measure()
+    m1 = c1.measure()
+
+    print(f"Core 0 Measurement: {m0}")
+    print(f"Core 1 Measurement: {m1}")
+
+    # Check correlation of the specific entangled qubits
+    # m0 is string of 10 bits. MSB is q9, LSB is q0.
+    q0_val = m0[-1]
+    q1_val = m1[-1]
+
+    print(f"\nCorrelation Check:\nC0[q0] = {q0_val}\nC1[q0] = {q1_val}")
+
+    if q0_val == q1_val:
+        print(">> Bell State Confirmed (Correlated)")
+    else:
+        print(">> No Correlation (Independent)")
+
+except Exception as e:
+    print(f"Error: {e}")
+</textarea>
+                    </div>
+                </div>
+
+                <div class="panel" id="results-panel">
+                    <div class="panel-header">
+                        <span id="right-panel-title">Execution Output</span>
+                        <button class="collapse-btn" onclick="togglePanel('results-panel')">[-]</button>
+                    </div>
+
+                    <div class="panel-content">
+                        <!-- Tab: Output -->
+                        <div id="output-view" class="tab-content active">
+                            <div id="output-log" class="output-log">System ready. Initialize execution sequence.</div>
+                        </div>
+
+                        <!-- Tab: Attributes -->
+                        <div id="attributes-view" class="tab-content">
+                            <div class="attr-list">
+                                <div class="attr-item"><span class="attr-key">Architecture</span><span class="attr-val">Transmon Superconducting</span></div>
+                                <div class="attr-item"><span class="attr-key">Topology</span><span class="attr-val">Heavy-Hex Lattice</span></div>
+                                <div class="attr-item"><span class="attr-key">Avg. T1 Time</span><span class="attr-val">78.5 µs</span></div>
+                                <div class="attr-item"><span class="attr-key">Avg. T2 Time</span><span class="attr-val">92.1 µs</span></div>
+                                <div class="attr-item"><span class="attr-key">1-Qubit Gate Fidelity</span><span class="attr-val">99.98%</span></div>
+                                <div class="attr-item"><span class="attr-key">2-Qubit Gate Fidelity</span><span class="attr-val">99.7%</span></div>
+                                <div class="attr-item"><span class="attr-key">Readout Fidelity</span><span class="attr-val">98.5%</span></div>
+                                <div class="attr-item"><span class="attr-key">Cooling System</span><span class="attr-val">Dilution Refrigerator (15mK)</span></div>
+                            </div>
+                        </div>
+
+                        <!-- Tab: Documentation -->
+                        <div id="docs-view" class="tab-content">
+                            <div class="attr-list">
+                                <div style="padding: 10px; border-bottom: 1px solid var(--border-color); font-weight: bold; color: var(--accent-color);">Class QPU</div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">qpu.cores</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Property returning an iterable range of active core IDs.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">qpu.get_core(id)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Returns a QuantumCore object for the given ID.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">qpu.attributes</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Returns a dictionary of system attributes (e.g. status, active cores).</span>
+                                </div>
+
+                                <div style="padding: 10px; border-bottom: 1px solid var(--border-color); font-weight: bold; color: var(--accent-color); margin-top: 20px;">Class QuantumCore</div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.h(qubit)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Applies Hadamard gate to the specified qubit index.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.x(qubit)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Applies Pauli-X gate.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.y(qubit)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Applies Pauli-Y gate.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.z(qubit)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Applies Pauli-Z gate.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.cnot(c, t)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Applies CNOT gate within the core (control, target).</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.entangle_cnot(...)</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">args: (local_control, other_core, remote_target). Entangles two cores.</span>
+                                </div>
+                                <div class="attr-item">
+                                    <span class="attr-key" style="flex:1">core.measure()</span>
+                                    <span class="attr-val" style="flex:2; font-size:12px; color: #8b949e">Measures all qubits in the core, returns bitstring.</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Tab: Visualizer -->
+                        <div id="visualizer-view" class="tab-content">
+                            <div class="qpu-grid" id="qpu-grid">
+                                <canvas id="visualizer-canvas"></canvas>
+                                <!-- Generated by JS -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Setup CodeMirror
+        var editor = CodeMirror.fromTextArea(document.getElementById("code-editor"), {
+            mode: "python",
+            theme: "dracula",
+            lineNumbers: true,
+            autoCloseBrackets: true,
+            indentUnit: 4,
+            matchBrackets: true
+        });
+
+        // Tab Switching Logic
+        function switchTab(tabId) {
+            // If tabId is editor-view, we do nothing as editor is always on left.
+            // Actually, the sidebar buttons control the RIGHT panel content.
+            // Except "editor-view" button which might just focus or ensure editor is visible.
+
+            if (tabId === 'editor-view') {
+                 // Maybe flash the editor or focus it
+                 editor.focus();
+                 return;
+            }
+
+            // Hide all tab contents in right panel
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+
+            // Update panel title
+            const titles = {
+                'output-view': 'Execution Output',
+                'attributes-view': 'System Attributes',
+                'visualizer-view': 'QPU Topology',
+                'docs-view': 'API Documentation'
+            };
+
+            // If we are switching to visualizer, generate grid
+            if (tabId === 'visualizer-view') {
+                renderVisualizer();
+            }
+
+            // Highlight active sidebar button (reset others)
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            // Find the button that called this (hacky)
+            event.currentTarget.classList.add('active');
+
+            // Ensure result panel is visible
+            const panel = document.getElementById('results-panel');
+            if (panel.style.width === '0px') {
+                togglePanel('results-panel');
+            }
+        }
+
+        function togglePanel(panelId) {
+            const panel = document.getElementById(panelId);
+            if (panel.style.width === '0px') {
+                panel.style.width = panelId === 'editor-panel' ? '60%' : '40%';
+                panel.style.borderRight = panelId === 'editor-panel' ? '1px solid var(--border-color)' : 'none';
+            } else {
+                panel.style.width = '0px';
+                panel.style.borderRight = 'none';
+            }
+        }
+
+        // QPU Visualizer
+        function renderVisualizer() {
+            const container = document.getElementById('qpu-grid');
+            const canvas = document.getElementById('visualizer-canvas');
+            const ctx = canvas.getContext('2d');
+
+            // Clear existing nodes but keep canvas
+            const existingNodes = document.querySelectorAll('.qubit-node, .more-cores-label');
+            existingNodes.forEach(n => n.remove());
+
+            // Resize canvas
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+
+            const cores = parseInt(document.getElementById('cores-select').value);
+            const limit = Math.min(cores, 64); // Limit to 64 for nice 8x8 grid
+
+            const cols = 8;
+            const rows = Math.ceil(limit / cols);
+            const gap = 80;
+
+            const startX = (canvas.width - (cols - 1) * gap) / 2;
+            const startY = (canvas.height - (rows - 1) * gap) / 2;
+
+            const nodes = [];
+
+            // Draw connections first
+            ctx.strokeStyle = '#30363d';
+            ctx.lineWidth = 2;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.beginPath();
+
+            for(let i=0; i<limit; i++) {
+                const r = Math.floor(i / cols);
+                const c = i % cols;
+
+                const x = startX + c * gap;
+                const y = startY + r * gap;
+
+                nodes.push({x, y, id: i});
+
+                // Horizontal connection
+                if (c < cols - 1 && i + 1 < limit) {
+                    ctx.moveTo(x, y);
+                    ctx.lineTo(startX + (c + 1) * gap, y);
+                }
+                // Vertical connection
+                if (r < rows - 1 && i + cols < limit) {
+                    ctx.moveTo(x, y);
+                    ctx.lineTo(x, startY + (r + 1) * gap);
+                }
+            }
+            ctx.stroke();
+
+            // Draw pulsing connections (random activity)
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(88, 166, 255, 0.4)';
+            ctx.lineWidth = 2;
+            for(let i=0; i<limit; i++) {
+                if (Math.random() > 0.8) {
+                     const r = Math.floor(i / cols);
+                     const c = i % cols;
+                     const x = startX + c * gap;
+                     const y = startY + r * gap;
+
+                     if (c < cols - 1 && i+1 < limit) {
+                         ctx.moveTo(x, y);
+                         ctx.lineTo(startX + (c+1) * gap, y);
+                     }
+                }
+            }
+            ctx.stroke();
+
+            // Place nodes
+            nodes.forEach(n => {
+                const node = document.createElement('div');
+                node.className = 'qubit-node';
+                node.innerText = 'C' + n.id;
+                node.style.left = (n.x - 20) + 'px';
+                node.style.top = (n.y - 20) + 'px';
+
+                // Random active state or systematic
+                if(Math.random() > 0.7) node.classList.add('active');
+
+                container.appendChild(node);
+            });
+
+            if (cores > limit) {
+                const more = document.createElement('div');
+                more.className = 'more-cores-label';
+                more.innerText = `+ ${cores - limit} more cores active in cluster`;
+                more.style.position = 'absolute';
+                more.style.bottom = '20px';
+                more.style.width = '100%';
+                more.style.textAlign = 'center';
+                more.style.color = '#58a6ff';
+                more.style.fontFamily = 'JetBrains Mono';
+                more.style.fontSize = '12px';
+                container.appendChild(more);
+            }
+        }
+
+        function updateActiveDisplay() {
+            const cores = parseInt(document.getElementById('cores-select').value);
+            const activeLimit = Math.min(cores, 100);
+            const percentage = (activeLimit / cores) * 100;
+            const display = document.getElementById('active-cores-display');
+
+            let pText = percentage < 1 ? percentage.toFixed(2) + '%' : percentage.toFixed(0) + '%';
+            if (percentage < 0.1 && percentage > 0) pText = "0.1%"; // Hardcode to match user request display style if needed
+
+            display.innerText = `Active: ${activeLimit} (${pText})`;
+            display.style.display = 'inline';
+
+            // Update Mini Viz
+            updateMiniViz(cores);
+
+            // Also update visualizer if it is active
+            if (document.getElementById('visualizer-view').classList.contains('active')) {
+                renderVisualizer();
+            }
+        }
+
+        function updateMiniViz(cores) {
+            const svg = document.getElementById('core-mini-viz');
+            // Clear
+            while (svg.firstChild) {
+                svg.removeChild(svg.firstChild);
+            }
+
+            // Create grid based on magnitude
+            let density = 2; // 2x2
+            if (cores >= 100) density = 4;
+            if (cores >= 1000) density = 6;
+            if (cores >= 100000) density = 8;
+
+            const size = 24;
+            const gap = size / density;
+            const radius = (gap / 3);
+
+            for(let r=0; r<density; r++) {
+                for(let c=0; c<density; c++) {
+                    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+                    circle.setAttribute("cx", (c * gap) + (gap/2));
+                    circle.setAttribute("cy", (r * gap) + (gap/2));
+                    circle.setAttribute("r", radius);
+                    circle.setAttribute("fill", "#238636");
+                    svg.appendChild(circle);
+                }
+            }
+        }
+
+        // Run Code
+        async function runCode() {
+            // Switch to output tab
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById('output-view').classList.add('active');
+
+            const outputDiv = document.getElementById("output-log");
+            const code = editor.getValue();
+            const cores = parseInt(document.getElementById("cores-select").value);
+            const entangle = document.getElementById("entangle-check").checked;
+            const libs = document.getElementById("lib-install").value;
+
+            outputDiv.innerHTML = "<span style='color: #8b949e'>Initializing QPU context...</span><br>";
+            document.getElementById('loading').style.display = 'flex';
+
+            try {
+                const response = await fetch('/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        code: code,
+                        num_cores: cores,
+                        enable_entanglement: entangle,
+                        install_libraries: libs
+                    })
+                });
+
+                const data = await response.json();
+
+                document.getElementById('loading').style.display = 'none';
+                outputDiv.innerHTML = "";
+
+                if (data.error) {
+                    outputDiv.innerHTML += `<div class="output-error"><strong>RUNTIME ERROR</strong><br>${data.error}</div>`;
+                } else {
+                    outputDiv.innerText = data.output || "Process finished with exit code 0.";
+                }
+
+            } catch (e) {
+                document.getElementById('loading').style.display = 'none';
+                outputDiv.innerHTML = `<span class="output-error">Network Error: ${e.message}</span>`;
+            }
+        }
+
+        async function killProcess() {
+            try {
+                const response = await fetch('/kill', { method: 'POST' });
+                const data = await response.json();
+                const outputDiv = document.getElementById("output-log");
+                outputDiv.innerHTML += `<br><br><span style="color: #da3633">>> INTERRUPT SIGNAL SENT. Killed ${data.count} process(es).</span>`;
+                document.getElementById('loading').style.display = 'none';
+            } catch (e) {
+                alert("Failed to send kill signal");
+            }
+        }
+
+        // Init active display
+        updateActiveDisplay();
+    </script>
+</body>
+</html>
